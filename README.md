@@ -96,6 +96,12 @@ You can also assign `className` and `style` props to the `Mention` elements to d
 Due to react-mentions' internal cursor tracking it is not good enough to simulate the editing of the textarea value using `ReactTestUtils.Simulate.change`.
 We recommend using [@testing-library/user-event](https://github.com/testing-library/user-event) for a realistic simulation of events as they would happen in the browser as the user interacts the textarea.
 
+## TypeScript
+
+This repository now includes a basic `tsconfig.json` and TypeScript type definitions. Install dependencies and run `npm run build` to compile the TypeScript sources.
+
+Source files are being migrated from `src` to `src-ts`. New TypeScript code should be placed in `src-ts`.
+
 ---
 
 If you want to contribute, first of all: thank you ❤️.
