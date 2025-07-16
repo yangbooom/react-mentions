@@ -5,6 +5,15 @@
   "files": [
     "dist"
   ],
+  "scripts": {
+    "format": "prettier --write --no-semi --single-quote --trailing-comma es5 \"{src,src-ts,test,demo/src}/**/*.{js,ts,tsx}\"",
+    "lint": "eslint --max-warnings=0 --ext .js,.ts,.tsx src src-ts demo",
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/signavio/react-mentions.git"
+  },
   "keywords": [
     "react",
     "mentions",
@@ -16,28 +25,6 @@
     "safari >= 10",
     "ie >= 11"
   ],
-  "license": "BSD-3-Clause",
-  "main": "dist/index.js",
-  "module": "dist/index.esm.js",
-  "scripts": {
-    "build": "rollup -c",
-    "build:watch": "rollup -c -w",
-    "prepare": "npm run build"
-  },
-  "devDependencies": {
-    "@babel/core": "^7.22.0",
-    "@babel/preset-env": "^7.22.0",
-    "@babel/preset-react": "^7.22.0",
-    "@rollup/plugin-babel": "^6.0.0",
-    "@rollup/plugin-commonjs": "^25.0.0",
-    "@rollup/plugin-node-resolve": "^15.0.0",
-    "eslint": "^4.1.1",
-    "prettier": "^1.10.2",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "rollup": "^3.26.0",
-    "rollup-plugin-peer-deps-external": "^2.2.4"
-  },
   "dependencies": {
     "invariant": "^2.2.4",
     "prop-types": "^15.5.8",
@@ -46,6 +33,15 @@
   "peerDependencies": {
     "react": ">=16.8.3",
     "react-dom": ">=16.8.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "typescript": "^5.8.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "eslint": "^4.1.1",
+    "prettier": "^1.10.2"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
