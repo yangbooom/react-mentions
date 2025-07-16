@@ -316,7 +316,7 @@ const MentionsInput = props => {
     ({ id, display }, { childIndex, querySequenceStart, querySequenceEnd, plainTextValue }) => {
         const config = readConfigFromChildren(children)
         const mentionsChild = Children.toArray(children)[childIndex]
-        const { markup, displayTransform, appendSpaceOnAdd, onAdd } = mentionsChild.props
+        const { markup, displayTransform = (id, display) => display || id, appendSpaceOnAdd, onAdd } = mentionsChild.props
 
         const start = mapPlainTextIndex(value, config, querySequenceStart, 'START')
         const end = start + querySequenceEnd - querySequenceStart
