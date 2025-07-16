@@ -1,4 +1,12 @@
-import React, { Children } from 'react'
+import React, {
+  Children,
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+} from 'react'
+import ReactDOM from 'react-dom'
 import {
   applyChangeToValue,
   countSuggestions,
@@ -7,33 +15,28 @@ import {
   getEndOfLastMention,
   getMentions,
   getPlainText,
+  getSuggestionHtmlId,
   getSubstringIndex,
-  makeMentionsMarkup,
-  mapPlainTextIndex,
-  readConfigFromChildren,
-  spliceString,
   isIE,
   isNumber,
   keys,
+  makeMentionsMarkup,
+  mapPlainTextIndex,
   omit,
-  getSuggestionHtmlId,
+  readConfigFromChildren,
+  spliceString,
 } from './utils'
 
 import Highlighter from './Highlighter'
-import PropTypes from 'prop-types'
-import ReactDOM from 'react-dom'
 import SuggestionsOverlay from './SuggestionsOverlay'
 import { defaultStyle } from './utils'
 
-export const makeTriggerRegex = function(trigger, options = {}) {
+export const makeTriggerRegex = (trigger, options = {}) => {
   if (trigger instanceof RegExp) {
     return trigger
   } else {
     const { allowSpaceInQuery } = options
     const escapedTriggerChar = escapeRegex(trigger)
-
-    // first capture group is the part to be replaced on completion
-    // second capture group is for extracting the search query
     return new RegExp(
       `(?:^|\\s)(${escapedTriggerChar}([^${
         allowSpaceInQuery ? '' : '\\s'
@@ -42,10 +45,9 @@ export const makeTriggerRegex = function(trigger, options = {}) {
   }
 }
 
-const getDataProvider = function(data, ignoreAccents) {
+const getDataProvider = (data, ignoreAccents) => {
   if (data instanceof Array) {
-    // if data is an array, create a function to query that
-    return function(query, callback) {
+    return (query, callback) => {
       const results = []
       for (let i = 0, l = data.length; i < l; ++i) {
         const display = data[i].display || data[i].id
@@ -56,327 +58,429 @@ const getDataProvider = function(data, ignoreAccents) {
       return results
     }
   } else {
-    // expect data to be a query function
     return data
   }
 }
 
 const KEY = { TAB: 9, RETURN: 13, ESC: 27, UP: 38, DOWN: 40 }
 
-let isComposing = false
+const MentionsInput = props => {
+  const {
+    value = '',
+    onKeyDown = () => null,
+    onSelect = () => null,
+    onBlur = () => null,
+    onChange,
+    children,
+    singleLine = false,
+    style,
+    inputComponent: CustomInput,
+    inputRef: forwardedInputRef,
+    suggestionsPortalHost,
+    ignoreAccents = false,
+    a11ySuggestionsListLabel,
+    customSuggestionsContainer,
+    allowSuggestionsAboveCursor = false,
+    forceSuggestionsAboveCursor = false,
+  } = props
 
-const propTypes = {
-  /**
-   * If set to `true` a regular text input element will be rendered
-   * instead of a textarea
-   */
-  singleLine: PropTypes.bool,
-  allowSpaceInQuery: PropTypes.bool,
-  allowSuggestionsAboveCursor: PropTypes.bool,
-  forceSuggestionsAboveCursor: PropTypes.bool,
-  ignoreAccents: PropTypes.bool,
-  a11ySuggestionsListLabel: PropTypes.string,
+  // Refs
+  const inputRef = useRef(null)
+  const highlighterRef = useRef(null)
+  const suggestionsRef = useRef(null)
+  const containerRef = useRef(null)
+  const queryId = useRef(0)
+  const suggestions = useRef({})
+  const suggestionsMouseDown = useRef(false)
+  const isComposingRef = useRef(false)
 
-  value: PropTypes.string,
-  onKeyDown: PropTypes.func,
-  customSuggestionsContainer: PropTypes.func,
-  onSelect: PropTypes.func,
-  onBlur: PropTypes.func,
-  onChange: PropTypes.func,
-  suggestionsPortalHost:
-    typeof Element === 'undefined'
-      ? PropTypes.any
-      : PropTypes.PropTypes.instanceOf(Element),
-  inputRef: PropTypes.oneOfType([
-    PropTypes.func,
-    PropTypes.shape({
-      current:
-        typeof Element === 'undefined'
-          ? PropTypes.any
-          : PropTypes.instanceOf(Element),
-    }),
-  ]),
-  inputComponent: PropTypes.oneOfType([PropTypes.func, PropTypes.elementType]),
+  // State
+  const [focusIndex, setFocusIndex] = useState(0)
+  const [selection, setSelection] = useState({ start: null, end: null })
+  const [currentSuggestions, setCurrentSuggestions] = useState({})
+  const [caretPosition, setCaretPosition] = useState(null)
+  const [suggestionsPosition, setSuggestionsPosition] = useState({})
+  const [scrollFocusedIntoView, setScrollFocusedIntoView] = useState(false)
 
-  children: PropTypes.oneOfType([
-    PropTypes.element,
-    PropTypes.arrayOf(PropTypes.element),
-  ]).isRequired,
-}
+  const plainText = getPlainText(value, readConfigFromChildren(children))
 
-class MentionsInput extends React.Component {
-  static propTypes = propTypes
+  const executeOnChange = useCallback(
+    (event, ...args) => {
+      if (onChange) {
+        return onChange(event, ...args)
+      }
+      if (props.valueLink) {
+        return props.valueLink.requestChange(event.target.value, ...args)
+      }
+    },
+    [onChange, props.valueLink]
+  )
 
-  static defaultProps = {
-    ignoreAccents: false,
-    singleLine: false,
-    allowSuggestionsAboveCursor: false,
-    onKeyDown: () => null,
-    onSelect: () => null,
-    onBlur: () => null,
-  }
+  const updateSuggestions = useCallback(
+    (
+      localQueryId,
+      childIndex,
+      query,
+      querySequenceStart,
+      querySequenceEnd,
+      plainTextValue,
+      results
+    ) => {
+      if (localQueryId !== queryId.current) return
 
-  constructor(props) {
-    super(props)
-    this.suggestions = {}
-    this.uuidSuggestionsOverlay = Math.random()
-      .toString(16)
-      .substring(2)
+      suggestions.current = {
+        ...suggestions.current,
+        [childIndex]: {
+          queryInfo: {
+            childIndex,
+            query,
+            querySequenceStart,
+            querySequenceEnd,
+            plainTextValue,
+          },
+          results,
+        },
+      }
 
-    this.handleCopy = this.handleCopy.bind(this)
-    this.handleCut = this.handleCut.bind(this)
-    this.handlePaste = this.handlePaste.bind(this)
-
-    this.state = {
-      focusIndex: 0,
-
-      selectionStart: null,
-      selectionEnd: null,
-
-      suggestions: {},
-
-      caretPosition: null,
-      suggestionsPosition: {},
-
-      setSelectionAfterHandlePaste: false,
-    }
-  }
-
-  componentDidMount() {
-    document.addEventListener('copy', this.handleCopy)
-    document.addEventListener('cut', this.handleCut)
-    document.addEventListener('paste', this.handlePaste)
-
-    this.updateSuggestionsPosition()
-  }
-
-  componentDidUpdate(prevProps, prevState) {
-    // Update position of suggestions unless this componentDidUpdate was
-    // triggered by an update to suggestionsPosition.
-    if (prevState.suggestionsPosition === this.state.suggestionsPosition) {
-      this.updateSuggestionsPosition()
-    }
-
-    // maintain selection in case a mention is added/removed causing
-    // the cursor to jump to the end
-    if (this.state.setSelectionAfterMentionChange) {
-      this.setState({ setSelectionAfterMentionChange: false })
-      this.setSelection(this.state.selectionStart, this.state.selectionEnd)
-    }
-    if (this.state.setSelectionAfterHandlePaste) {
-      this.setState({ setSelectionAfterHandlePaste: false })
-      this.setSelection(this.state.selectionStart, this.state.selectionEnd)
-    }
-  }
-
-  componentWillUnmount() {
-    document.removeEventListener('copy', this.handleCopy)
-    document.removeEventListener('cut', this.handleCut)
-    document.removeEventListener('paste', this.handlePaste)
-  }
-
-  render() {
-    return (
-      <div ref={this.setContainerElement} {...this.props.style}>
-        {this.renderControl()}
-        {this.renderSuggestionsOverlay()}
-      </div>
-    )
-  }
-
-  setContainerElement = (el) => {
-    this.containerElement = el
-  }
-
-  getInputProps = () => {
-    let { readOnly, disabled, style } = this.props
-
-    // pass all props that neither we, nor substyle, consume through to the input control
-    let props = omit(
-      this.props,
-      ['style', 'classNames', 'className'], // substyle props
-      keys(propTypes)
-    )
-
-    return {
-      ...props,
-      ...style('input'),
-
-      value: this.getPlainText(),
-      onScroll: this.updateHighlighterScroll,
-
-      ...(!readOnly &&
-        !disabled && {
-          onChange: this.handleChange,
-          onSelect: this.handleSelect,
-          onKeyDown: this.handleKeyDown,
-          onBlur: this.handleBlur,
-          onCompositionStart: this.handleCompositionStart,
-          onCompositionEnd: this.handleCompositionEnd,
-        }),
-
-      ...(this.isOpened() && {
-        role: 'combobox',
-        'aria-controls': this.uuidSuggestionsOverlay,
-        'aria-expanded': true,
-        'aria-autocomplete': 'list',
-        'aria-haspopup': 'listbox',
-        'aria-activedescendant': getSuggestionHtmlId(
-          this.uuidSuggestionsOverlay,
-          this.state.focusIndex
-        ),
-      }),
-    }
-  }
-
-  renderControl = () => {
-    let { singleLine, style, inputComponent: CustomInput } = this.props
-    let inputProps = this.getInputProps()
-
-    return (
-      <div {...style('control')}>
-        {this.renderHighlighter()}
-        {CustomInput
-          ? <CustomInput ref={this.setInputRef} {...inputProps} />
-          : singleLine
-            ? this.renderInput(inputProps)
-            : this.renderTextarea(inputProps)
-        }
-      </div>
-    )
-  }
-
-  renderInput = (props) => {
-    return <input type="text" ref={this.setInputRef} {...props} />
-  }
-
-  renderTextarea = (props) => {
-    return <textarea ref={this.setInputRef} {...props} />
-  }
-
-  setInputRef = (el) => {
-    this.inputElement = el
-    const { inputRef } = this.props
-    if (typeof inputRef === 'function') {
-      inputRef(el)
-    } else if (inputRef) {
-      inputRef.current = el
-    }
-  }
-
-  setSuggestionsElement = (el) => {
-    this.suggestionsElement = el
-  }
-
-  renderSuggestionsOverlay = () => {
-    if (!isNumber(this.state.selectionStart)) {
-      // do not show suggestions when the input does not have the focus
-      return null
-    }
-
-    const { position, left, top, right } = this.state.suggestionsPosition
-
-    const suggestionsNode = (
-      <SuggestionsOverlay
-        id={this.uuidSuggestionsOverlay}
-        style={this.props.style('suggestions')}
-        position={position}
-        left={left}
-        top={top}
-        right={right}
-        focusIndex={this.state.focusIndex}
-        scrollFocusedIntoView={this.state.scrollFocusedIntoView}
-        containerRef={this.setSuggestionsElement}
-        suggestions={this.state.suggestions}
-        customSuggestionsContainer={this.props.customSuggestionsContainer}
-        onSelect={this.addMention}
-        onMouseDown={this.handleSuggestionsMouseDown}
-        onMouseEnter={this.handleSuggestionsMouseEnter}
-        isLoading={this.isLoading()}
-        isOpened={this.isOpened()}
-        ignoreAccents={this.props.ignoreAccents}
-        a11ySuggestionsListLabel={this.props.a11ySuggestionsListLabel}
-      >
-        {this.props.children}
-      </SuggestionsOverlay>
-    )
-    if (this.props.suggestionsPortalHost) {
-      return ReactDOM.createPortal(
-        suggestionsNode,
-        this.props.suggestionsPortalHost
+      const newSuggestionsCount = countSuggestions(suggestions.current)
+      setFocusIndex(prev =>
+        prev >= newSuggestionsCount
+          ? Math.max(newSuggestionsCount - 1, 0)
+          : prev
       )
-    } else {
-      return suggestionsNode
-    }
-  }
+      setCurrentSuggestions(suggestions.current)
+    },
+    []
+  )
 
-  renderHighlighter = () => {
-    const { selectionStart, selectionEnd } = this.state
-    const { singleLine, children, value, style } = this.props
+  const queryData = useCallback(
+    (query, childIndex, querySequenceStart, querySequenceEnd, plainTextValue) => {
+      const mentionChild = Children.toArray(children)[childIndex]
+      const provideData = getDataProvider(mentionChild.props.data, ignoreAccents)
+      const syncResult = provideData(
+        query,
+        updateSuggestions.bind(
+          null,
+          queryId.current,
+          childIndex,
+          query,
+          querySequenceStart,
+          querySequenceEnd,
+          plainTextValue
+        )
+      )
+      if (syncResult instanceof Array) {
+        updateSuggestions(
+          queryId.current,
+          childIndex,
+          query,
+          querySequenceStart,
+          querySequenceEnd,
+          plainTextValue,
+          syncResult
+        )
+      }
+    },
+    [children, ignoreAccents, updateSuggestions]
+  )
+  
+  const clearSuggestions = useCallback(() => {
+    queryId.current++
+    suggestions.current = {}
+    setCurrentSuggestions({})
+    setFocusIndex(0)
+  }, [])
+  
+  const updateMentionsQueries = useCallback(
+    (plainTextValue, caretPosition) => {
+      queryId.current++
+      suggestions.current = {}
+      setCurrentSuggestions({})
 
-    return (
-      <Highlighter
-        containerRef={this.setHighlighterElement}
-        style={style('highlighter')}
-        value={value}
-        singleLine={singleLine}
-        selectionStart={selectionStart}
-        selectionEnd={selectionEnd}
-        onCaretPositionChange={this.handleCaretPositionChange}
-      >
-        {children}
-      </Highlighter>
-    )
-  }
+      const config = readConfigFromChildren(children)
+      const positionInValue = mapPlainTextIndex(value, config, caretPosition, 'NULL')
 
-  setHighlighterElement = (el) => {
-    this.highlighterElement = el
-  }
+      if (positionInValue === null) {
+        return
+      }
 
-  handleCaretPositionChange = (position) => {
-    this.setState({ caretPosition: position })
-  }
+      const substringStartIndex = getEndOfLastMention(
+        value.substring(0, positionInValue),
+        config
+      )
+      const subString = plainTextValue.substring(
+        substringStartIndex,
+        caretPosition
+      )
 
-  // Returns the text to set as the value of the textarea with all markups removed
-  getPlainText = () => {
-    return getPlainText(
-      this.props.value || '',
-      readConfigFromChildren(this.props.children)
-    )
-  }
+      Children.forEach(children, (child, childIndex) => {
+        if (!child) return
+        const regex = makeTriggerRegex(child.props.trigger, props)
+        const match = subString.match(regex)
+        if (match) {
+          const querySequenceStart =
+            substringStartIndex + subString.indexOf(match[1], match.index)
+          queryData(
+            match[2],
+            childIndex,
+            querySequenceStart,
+            querySequenceStart + match[1].length,
+            plainTextValue
+          )
+        }
+      })
+    },
+    [children, props, queryData, value]
+  )
 
-  executeOnChange = (event, ...args) => {
-    if (this.props.onChange) {
-      return this.props.onChange(event, ...args)
-    }
+  const handleChange = useCallback(
+    ev => {
+      isComposingRef.current = false
+      if (isIE()) {
+        const currentDocument =
+          (document.activeElement && document.activeElement.contentDocument) ||
+          document
+        if (currentDocument.activeElement !== ev.target) {
+          return
+        }
+      }
 
-    if (this.props.valueLink) {
-      return this.props.valueLink.requestChange(event.target.value, ...args)
-    }
-  }
+      const config = readConfigFromChildren(children)
+      let newPlainTextValue = ev.target.value
 
-  handlePaste(event) {
-    if (event.target !== this.inputElement) {
-      return
-    }
-    if (!this.supportsClipboardActions(event)) {
-      return
-    }
+      const newValue = applyChangeToValue(
+        value,
+        newPlainTextValue,
+        {
+          selectionStartBefore: selection.start,
+          selectionEndBefore: selection.end,
+          selectionEndAfter: ev.target.selectionEnd,
+        },
+        config
+      )
 
-    event.preventDefault()
+      newPlainTextValue = getPlainText(newValue, config)
 
-    const { selectionStart, selectionEnd } = this.state
-    const { value, children } = this.props
+      let selectionStart = ev.target.selectionStart
+      let selectionEnd = ev.target.selectionEnd
 
+      let startOfMention = findStartOfMentionInPlainText(
+        value,
+        config,
+        selectionStart
+      )
+
+      if (startOfMention !== undefined && selection.end > startOfMention) {
+        selectionStart =
+          startOfMention + (ev.nativeEvent.data ? ev.nativeEvent.data.length : 0)
+        selectionEnd = selectionStart
+      }
+      
+      setSelection({ start: selectionStart, end: selectionEnd })
+
+      if (ev.nativeEvent.isComposing && selectionStart === selectionEnd) {
+        updateMentionsQueries(ev.target.value, selectionStart)
+      }
+
+      const mentions = getMentions(newValue, config)
+      const eventMock = { target: { value: newValue } }
+      executeOnChange(eventMock, newValue, newPlainTextValue, mentions)
+    },
+    [children, executeOnChange, selection.end, selection.start, updateMentionsQueries, value]
+  )
+
+  const handleSelect = useCallback(
+    ev => {
+      setSelection({ start: ev.target.selectionStart, end: ev.target.selectionEnd })
+
+      if (isComposingRef.current) return
+
+      if (ev.target.selectionStart === ev.target.selectionEnd) {
+        updateMentionsQueries(ev.target.value, ev.target.selectionStart)
+      } else {
+        clearSuggestions()
+      }
+
+      if (highlighterRef.current && inputRef.current) {
+        highlighterRef.current.scrollLeft = inputRef.current.scrollLeft
+        highlighterRef.current.scrollTop = inputRef.current.scrollTop
+        highlighterRef.current.height = inputRef.current.height
+      }
+
+      onSelect(ev)
+    },
+    [clearSuggestions, onSelect, updateMentionsQueries]
+  )
+  
+  const addMention = useCallback(
+    ({ id, display }, { childIndex, querySequenceStart, querySequenceEnd, plainTextValue }) => {
+        const config = readConfigFromChildren(children)
+        const mentionsChild = Children.toArray(children)[childIndex]
+        const { markup, displayTransform, appendSpaceOnAdd, onAdd } = mentionsChild.props
+
+        const start = mapPlainTextIndex(value, config, querySequenceStart, 'START')
+        const end = start + querySequenceEnd - querySequenceStart
+        
+        let insert = makeMentionsMarkup(markup, id, display)
+        if (appendSpaceOnAdd) {
+            insert += ' '
+        }
+        const newValue = spliceString(value, start, end, insert)
+
+        if (inputRef.current) {
+            inputRef.current.focus()
+        }
+
+        let displayValue = displayTransform(id, display)
+        if (appendSpaceOnAdd) {
+            displayValue += ' '
+        }
+        
+        const newCaretPosition = querySequenceStart + displayValue.length
+        setSelection({ start: newCaretPosition, end: newCaretPosition })
+
+        const eventMock = { target: { value: newValue } }
+        const mentions = getMentions(newValue, config)
+        const newPlainTextValue = spliceString(
+            plainTextValue,
+            querySequenceStart,
+            querySequenceEnd,
+            displayValue
+        )
+        executeOnChange(eventMock, newValue, newPlainTextValue, mentions)
+
+        if (onAdd) {
+            onAdd(id, display, start, end)
+        }
+
+        clearSuggestions()
+    },
+    [children, clearSuggestions, executeOnChange, value]
+  )
+
+  const shiftFocus = useCallback(
+    delta => {
+      const suggestionsCount = countSuggestions(currentSuggestions)
+      setFocusIndex(
+        (suggestionsCount + focusIndex + delta) % suggestionsCount
+      )
+      setScrollFocusedIntoView(true)
+    },
+    [currentSuggestions, focusIndex]
+  )
+
+  const selectFocused = useCallback(() => {
+    const { result, queryInfo } = Object.values(currentSuggestions).reduce(
+        (acc, { results, queryInfo }) => [
+            ...acc,
+            ...results.map((result) => ({ result, queryInfo })),
+        ],
+        []
+    )[focusIndex]
+    addMention(result, queryInfo)
+    setFocusIndex(0)
+  }, [addMention, currentSuggestions, focusIndex])
+  
+  const handleKeyDown = useCallback(
+    ev => {
+      const suggestionsCount = countSuggestions(currentSuggestions)
+
+      if (suggestionsCount === 0 || !suggestionsRef.current) {
+        onKeyDown(ev)
+        return
+      }
+
+      if (Object.values(KEY).indexOf(ev.keyCode) >= 0) {
+        ev.preventDefault()
+        ev.stopPropagation()
+      }
+
+      switch (ev.keyCode) {
+        case KEY.ESC:
+          clearSuggestions()
+          break
+        case KEY.DOWN:
+          shiftFocus(+1)
+          break
+        case KEY.UP:
+          shiftFocus(-1)
+          break
+        case KEY.RETURN:
+          selectFocused()
+          break
+        case KEY.TAB:
+          selectFocused()
+          break
+        default:
+          break
+      }
+    },
+    [clearSuggestions, currentSuggestions, onKeyDown, selectFocused, shiftFocus]
+  )
+
+  const handleBlur = useCallback(
+    ev => {
+      const clickedSuggestion = suggestionsMouseDown.current
+      suggestionsMouseDown.current = false
+
+      if (!clickedSuggestion) {
+        setSelection({ start: null, end: null })
+      }
+
+      window.setTimeout(() => {
+        if (highlighterRef.current && inputRef.current) {
+          highlighterRef.current.scrollTop = inputRef.current.scrollTop
+        }
+      }, 1)
+
+      onBlur(ev, clickedSuggestion)
+    },
+    [onBlur]
+  )
+  
+  // Clipboard
+  const saveSelectionToClipboard = useCallback((event) => {
+    const selectionStart = inputRef.current.selectionStart
+    const selectionEnd = inputRef.current.selectionEnd
     const config = readConfigFromChildren(children)
-
-    const markupStartIndex = mapPlainTextIndex(
-      value,
-      config,
-      selectionStart,
-      'START'
-    )
+    const markupStartIndex = mapPlainTextIndex(value, config, selectionStart, 'START')
     const markupEndIndex = mapPlainTextIndex(value, config, selectionEnd, 'END')
+    event.clipboardData.setData('text/plain', event.target.value.slice(selectionStart, selectionEnd))
+    event.clipboardData.setData('text/react-mentions', value.slice(markupStartIndex, markupEndIndex))
+  }, [children, value]);
+  
+  const handleCopy = useCallback((event) => {
+    if (event.target !== inputRef.current) return
+    if (!event.clipboardData) return
+    event.preventDefault()
+    saveSelectionToClipboard(event)
+  }, [saveSelectionToClipboard]);
+
+  const handleCut = useCallback((event) => {
+    if (event.target !== inputRef.current) return
+    if (!event.clipboardData) return
+    event.preventDefault()
+    saveSelectionToClipboard(event)
+    
+    const config = readConfigFromChildren(children)
+    const markupStartIndex = mapPlainTextIndex(value, config, selection.start, 'START')
+    const markupEndIndex = mapPlainTextIndex(value, config, selection.end, 'END')
+
+    const newValue = [value.slice(0, markupStartIndex), value.slice(markupEndIndex)].join('')
+    const newPlainTextValue = getPlainText(newValue, config)
+
+    const eventMock = { target: { ...event.target, value: newPlainTextValue } }
+    executeOnChange(eventMock, newValue, newPlainTextValue, getMentions(value, config))
+  }, [children, executeOnChange, saveSelectionToClipboard, selection.end, selection.start, value]);
+
+  const handlePaste = useCallback((event) => {
+    if (event.target !== inputRef.current) return
+    if (!event.clipboardData) return
+    event.preventDefault()
+    
+    const config = readConfigFromChildren(children)
+    const markupStartIndex = mapPlainTextIndex(value, config, selection.start, 'START')
+    const markupEndIndex = mapPlainTextIndex(value, config, selection.end, 'END')
 
     const pastedMentions = event.clipboardData.getData('text/react-mentions')
     const pastedData = event.clipboardData.getData('text/plain')
@@ -389,347 +493,45 @@ class MentionsInput extends React.Component {
     ).replace(/\r/g, '')
 
     const newPlainTextValue = getPlainText(newValue, config)
-
     const eventMock = { target: { ...event.target, value: newValue } }
+    executeOnChange(eventMock, newValue, newPlainTextValue, getMentions(newValue, config))
 
-    this.executeOnChange(
-      eventMock,
-      newValue,
-      newPlainTextValue,
-      getMentions(newValue, config)
-    )
+    const startOfMention = findStartOfMentionInPlainText(value, config, selection.start)
+    const nextPos = (startOfMention || selection.start) + getPlainText(pastedMentions || pastedData, config).length
+    setSelection({ start: nextPos, end: nextPos });
+  }, [children, executeOnChange, selection.end, selection.start, value]);
 
-    // Move the cursor position to the end of the pasted data
-    const startOfMention = findStartOfMentionInPlainText(
-      value,
-      config,
-      selectionStart
-    )
-    const nextPos =
-      (startOfMention || selectionStart) +
-      getPlainText(pastedMentions || pastedData, config).length
-    this.setState({
-      selectionStart: nextPos,
-      selectionEnd: nextPos,
-      setSelectionAfterHandlePaste: true,
-    })
-  }
+  // Effects
+  useEffect(() => {
+    document.addEventListener('copy', handleCopy)
+    document.addEventListener('cut', handleCut)
+    document.addEventListener('paste', handlePaste)
+    return () => {
+      document.removeEventListener('copy', handleCopy)
+      document.removeEventListener('cut', handleCut)
+      document.removeEventListener('paste', handlePaste)
+    }
+  }, [handleCopy, handleCut, handlePaste])
 
-  saveSelectionToClipboard(event) {
-    // use the actual selectionStart & selectionEnd instead of the one stored
-    // in state to ensure copy & paste also works on disabled inputs & textareas
-    const selectionStart = this.inputElement.selectionStart
-    const selectionEnd = this.inputElement.selectionEnd
-    const { children, value } = this.props
+  useLayoutEffect(() => {
+    if (inputRef.current && selection.start !== null) {
+      inputRef.current.setSelectionRange(selection.start, selection.end)
+    }
+  }, [selection])
 
-    const config = readConfigFromChildren(children)
-
-    const markupStartIndex = mapPlainTextIndex(
-      value,
-      config,
-      selectionStart,
-      'START'
-    )
-    const markupEndIndex = mapPlainTextIndex(value, config, selectionEnd, 'END')
-
-    event.clipboardData.setData(
-      'text/plain',
-      event.target.value.slice(selectionStart, selectionEnd)
-    )
-    event.clipboardData.setData(
-      'text/react-mentions',
-      value.slice(markupStartIndex, markupEndIndex)
-    )
-  }
-
-  supportsClipboardActions(event) {
-    return !!event.clipboardData
-  }
-
-  handleCopy(event) {
-    if (event.target !== this.inputElement) {
+  const updateSuggestionsPosition = useCallback(() => {
+    if (!caretPosition || !suggestionsRef.current) {
       return
     }
-    if (!this.supportsClipboardActions(event)) {
-      return
+    const getComputedStyleLengthProp = (forElement, propertyName) => {
+      const length = parseFloat(
+        window.getComputedStyle(forElement, null).getPropertyValue(propertyName)
+      )
+      return isFinite(length) ? length : 0
     }
 
-    event.preventDefault()
-
-    this.saveSelectionToClipboard(event)
-  }
-
-  handleCut(event) {
-    if (event.target !== this.inputElement) {
-      return
-    }
-    if (!this.supportsClipboardActions(event)) {
-      return
-    }
-
-    event.preventDefault()
-
-    this.saveSelectionToClipboard(event)
-
-    const { selectionStart, selectionEnd } = this.state
-    const { children, value } = this.props
-
-    const config = readConfigFromChildren(children)
-
-    const markupStartIndex = mapPlainTextIndex(
-      value,
-      config,
-      selectionStart,
-      'START'
-    )
-    const markupEndIndex = mapPlainTextIndex(value, config, selectionEnd, 'END')
-
-    const newValue = [
-      value.slice(0, markupStartIndex),
-      value.slice(markupEndIndex),
-    ].join('')
-    const newPlainTextValue = getPlainText(newValue, config)
-
-    const eventMock = {
-      target: { ...event.target, value: newPlainTextValue },
-    }
-
-    this.executeOnChange(
-      eventMock,
-      newValue,
-      newPlainTextValue,
-      getMentions(value, config)
-    )
-  }
-
-  // Handle input element's change event
-  handleChange = (ev) => {
-    isComposing = false
-    if (isIE()) {
-      // if we are inside iframe, we need to find activeElement within its contentDocument
-      const currentDocument =
-        (document.activeElement && document.activeElement.contentDocument) ||
-        document
-      if (currentDocument.activeElement !== ev.target) {
-        // fix an IE bug (blur from empty input element with placeholder attribute trigger "input" event)
-        return
-      }
-    }
-
-    const value = this.props.value || ''
-    const config = readConfigFromChildren(this.props.children)
-
-    let newPlainTextValue = ev.target.value
-
-    let selectionStartBefore = this.state.selectionStart;
-    if(selectionStartBefore == null) {
-      selectionStartBefore = ev.target.selectionStart;
-    }
-
-    let selectionEndBefore = this.state.selectionEnd;
-    if(selectionEndBefore == null) {
-      selectionEndBefore = ev.target.selectionEnd;
-    }
-
-    // Derive the new value to set by applying the local change in the textarea's plain text
-    let newValue = applyChangeToValue(
-      value,
-      newPlainTextValue,
-      {
-        selectionStartBefore,
-        selectionEndBefore,
-        selectionEndAfter: ev.target.selectionEnd,
-      },
-      config
-    )
-
-    // In case a mention is deleted, also adjust the new plain text value
-    newPlainTextValue = getPlainText(newValue, config)
-
-    // Save current selection after change to be able to restore caret position after rerendering
-    let selectionStart = ev.target.selectionStart
-    let selectionEnd = ev.target.selectionEnd
-    let setSelectionAfterMentionChange = false
-
-    // Adjust selection range in case a mention will be deleted by the characters outside of the
-    // selection range that are automatically deleted
-    let startOfMention = findStartOfMentionInPlainText(
-      value,
-      config,
-      selectionStart
-    )
-
-    if (
-      startOfMention !== undefined &&
-      this.state.selectionEnd > startOfMention
-    ) {
-      // only if a deletion has taken place
-      selectionStart =
-        startOfMention + (ev.nativeEvent.data ? ev.nativeEvent.data.length : 0)
-      selectionEnd = selectionStart
-      setSelectionAfterMentionChange = true
-    }
-
-    this.setState({
-      selectionStart,
-      selectionEnd,
-      setSelectionAfterMentionChange: setSelectionAfterMentionChange,
-    })
-
-    let mentions = getMentions(newValue, config)
-
-    if (ev.nativeEvent.isComposing && selectionStart === selectionEnd) {
-      this.updateMentionsQueries(this.inputElement.value, selectionStart)
-    }
-
-    // Propagate change
-    // let handleChange = this.getOnChange(this.props) || emptyFunction;
-    let eventMock = { target: { value: newValue } }
-    // this.props.onChange.call(this, eventMock, newValue, newPlainTextValue, mentions);
-    this.executeOnChange(eventMock, newValue, newPlainTextValue, mentions)
-  }
-
-  // Handle input element's select event
-  handleSelect = (ev) => {
-    // keep track of selection range / caret position
-    this.setState({
-      selectionStart: ev.target.selectionStart,
-      selectionEnd: ev.target.selectionEnd,
-    })
-
-    // do nothing while a IME composition session is active
-    if (isComposing) return
-
-    // refresh suggestions queries
-    const el = this.inputElement
-    if (ev.target.selectionStart === ev.target.selectionEnd) {
-      this.updateMentionsQueries(el.value, ev.target.selectionStart)
-    } else {
-      this.clearSuggestions()
-    }
-
-    // sync highlighters scroll position
-    this.updateHighlighterScroll()
-
-    this.props.onSelect(ev)
-  }
-
-  handleKeyDown = (ev) => {
-    // do not intercept key events if the suggestions overlay is not shown
-    const suggestionsCount = countSuggestions(this.state.suggestions)
-
-    if (suggestionsCount === 0 || !this.suggestionsElement) {
-      this.props.onKeyDown(ev)
-
-      return
-    }
-
-    if (Object.values(KEY).indexOf(ev.keyCode) >= 0) {
-      ev.preventDefault()
-      ev.stopPropagation()
-    }
-
-    switch (ev.keyCode) {
-      case KEY.ESC: {
-        this.clearSuggestions()
-        return
-      }
-      case KEY.DOWN: {
-        this.shiftFocus(+1)
-        return
-      }
-      case KEY.UP: {
-        this.shiftFocus(-1)
-        return
-      }
-      case KEY.RETURN: {
-        this.selectFocused()
-        return
-      }
-      case KEY.TAB: {
-        this.selectFocused()
-        return
-      }
-      default: {
-        return
-      }
-    }
-  }
-
-  shiftFocus = (delta) => {
-    const suggestionsCount = countSuggestions(this.state.suggestions)
-
-    this.setState({
-      focusIndex:
-        (suggestionsCount + this.state.focusIndex + delta) % suggestionsCount,
-      scrollFocusedIntoView: true,
-    })
-  }
-
-  selectFocused = () => {
-    const { suggestions, focusIndex } = this.state
-
-    const { result, queryInfo } = Object.values(suggestions).reduce(
-      (acc, { results, queryInfo }) => [
-        ...acc,
-        ...results.map((result) => ({ result, queryInfo })),
-      ],
-      []
-    )[focusIndex]
-
-    this.addMention(result, queryInfo)
-
-    this.setState({
-      focusIndex: 0,
-    })
-  }
-
-  handleBlur = (ev) => {
-    const clickedSuggestion = this._suggestionsMouseDown
-    this._suggestionsMouseDown = false
-
-    // only reset selection if the mousedown happened on an element
-    // other than the suggestions overlay
-    if (!clickedSuggestion) {
-      this.setState({
-        selectionStart: null,
-        selectionEnd: null,
-      })
-    }
-
-    window.setTimeout(() => {
-      this.updateHighlighterScroll()
-    }, 1)
-
-    this.props.onBlur(ev, clickedSuggestion)
-  }
-
-  handleSuggestionsMouseDown = (ev) => {
-    this._suggestionsMouseDown = true
-  }
-
-  handleSuggestionsMouseEnter = (focusIndex) => {
-    this.setState({
-      focusIndex,
-      scrollFocusedIntoView: false,
-    })
-  }
-
-  updateSuggestionsPosition = () => {
-    let { caretPosition } = this.state
-    const {
-      suggestionsPortalHost,
-      allowSuggestionsAboveCursor,
-      forceSuggestionsAboveCursor,
-    } = this.props
-
-    if (!caretPosition || !this.suggestionsElement) {
-      return
-    }
-
-    let suggestions = this.suggestionsElement
-    let highlighter = this.highlighterElement
-    // first get viewport-relative position (highlighter is offsetParent of caret):
+    const suggestions = suggestionsRef.current
+    const highlighter = highlighterRef.current
     const caretOffsetParentRect = highlighter.getBoundingClientRect()
     const caretHeight = getComputedStyleLengthProp(highlighter, 'font-size')
     const viewportRelative = {
@@ -741,24 +543,15 @@ class MentionsInput extends React.Component {
       window.innerHeight || 0
     )
 
-    if (!suggestions) {
-      return
-    }
-
     let position = {}
-
-    // if suggestions menu is in a portal, update position to be releative to its portal node
     if (suggestionsPortalHost) {
       position.position = 'fixed'
       let left = viewportRelative.left
       let top = viewportRelative.top
-      // absolute/fixed positioned elements are positioned according to their entire box including margins; so we remove margins here:
       left -= getComputedStyleLengthProp(suggestions, 'margin-left')
       top -= getComputedStyleLengthProp(suggestions, 'margin-top')
-      // take into account highlighter/textinput scrolling:
       left -= highlighter.scrollLeft
       top -= highlighter.scrollTop
-      // guard for mentions suggestions list clipped by right edge of window
       const viewportWidth = Math.max(
         document.documentElement.clientWidth,
         window.innerWidth || 0
@@ -768,9 +561,6 @@ class MentionsInput extends React.Component {
       } else {
         position.left = left
       }
-      // guard for mentions suggestions list clipped by bottom edge of window if allowSuggestionsAboveCursor set to true.
-      // Move the list up above the caret if it's getting cut off by the bottom of the window, provided that the list height
-      // is small enough to NOT cover up the caret
       if (
         (allowSuggestionsAboveCursor &&
           top + suggestions.offsetHeight > viewportHeight &&
@@ -784,15 +574,11 @@ class MentionsInput extends React.Component {
     } else {
       let left = caretPosition.left - highlighter.scrollLeft
       let top = caretPosition.top - highlighter.scrollTop
-      // guard for mentions suggestions list clipped by right edge of window
-      if (left + suggestions.offsetWidth > this.containerElement.offsetWidth) {
+      if (containerRef.current && left + suggestions.offsetWidth > containerRef.current.offsetWidth) {
         position.right = 0
       } else {
         position.left = left
       }
-      // guard for mentions suggestions list clipped by bottom edge of window if allowSuggestionsAboveCursor set to true.
-      // move the list up above the caret if it's getting cut off by the bottom of the window, provided that the list height
-      // is small enough to NOT cover up the caret
       if (
         (allowSuggestionsAboveCursor &&
           viewportRelative.top -
@@ -808,280 +594,140 @@ class MentionsInput extends React.Component {
         position.top = top
       }
     }
-
     if (
-      position.left === this.state.suggestionsPosition.left &&
-      position.top === this.state.suggestionsPosition.top &&
-      position.position === this.state.suggestionsPosition.position
+      position.left === suggestionsPosition.left &&
+      position.top === suggestionsPosition.top &&
+      position.position === suggestionsPosition.position
     ) {
       return
     }
 
-    this.setState({
-      suggestionsPosition: position,
-    })
-  }
+    setSuggestionsPosition(position)
+  }, [allowSuggestionsAboveCursor, caretPosition, forceSuggestionsAboveCursor, suggestionsPortalHost, suggestionsPosition]);
 
-  updateHighlighterScroll = () => {
-    const input = this.inputElement
-    const highlighter = this.highlighterElement
-    if (!input || !highlighter) {
-      // since the invocation of this function is deferred,
-      // the whole component may have been unmounted in the meanwhile
-      return
-    }
-    highlighter.scrollLeft = input.scrollLeft
-    highlighter.scrollTop = input.scrollTop
-    highlighter.height = input.height
-  }
-
-  handleCompositionStart = () => {
-    isComposing = true
-  }
-
-  handleCompositionEnd = () => {
-    isComposing = false
-  }
-
-  setSelection = (selectionStart, selectionEnd) => {
-    if (selectionStart === null || selectionEnd === null) return
-
-    const el = this.inputElement
-    if (el.setSelectionRange) {
-      el.setSelectionRange(selectionStart, selectionEnd)
-    } else if (el.createTextRange) {
-      const range = el.createTextRange()
-      range.collapse(true)
-      range.moveEnd('character', selectionEnd)
-      range.moveStart('character', selectionStart)
-      range.select()
-    }
-  }
-
-  updateMentionsQueries = (plainTextValue, caretPosition) => {
-    // Invalidate previous queries. Async results for previous queries will be neglected.
-    this._queryId++
-    this.suggestions = {}
-    this.setState({
-      suggestions: {},
-    })
-
-    const value = this.props.value || ''
-    const { children } = this.props
-    const config = readConfigFromChildren(children)
-
-    const positionInValue = mapPlainTextIndex(
-      value,
-      config,
-      caretPosition,
-      'NULL'
-    )
-
-    // If caret is inside of mention, do not query
-    if (positionInValue === null) {
-      return
-    }
-
-    // Extract substring in between the end of the previous mention and the caret
-    const substringStartIndex = getEndOfLastMention(
-      value.substring(0, positionInValue),
-      config
-    )
-    const substring = plainTextValue.substring(
-      substringStartIndex,
-      caretPosition
-    )
-
-    // Check if suggestions have to be shown:
-    // Match the trigger patterns of all Mention children on the extracted substring
-    React.Children.forEach(children, (child, childIndex) => {
-      if (!child) {
-        return
+  useLayoutEffect(updateSuggestionsPosition, [updateSuggestionsPosition])
+  
+  const setInputRef = useCallback((el) => {
+      inputRef.current = el
+      if (typeof forwardedInputRef === 'function') {
+          forwardedInputRef(el)
+      } else if (forwardedInputRef) {
+          forwardedInputRef.current = el
       }
+  }, [forwardedInputRef]);
 
-      const regex = makeTriggerRegex(child.props.trigger, this.props)
-      const match = substring.match(regex)
-      if (match) {
-        const querySequenceStart =
-          substringStartIndex + substring.indexOf(match[1], match.index)
-        this.queryData(
-          match[2],
-          childIndex,
-          querySequenceStart,
-          querySequenceStart + match[1].length,
-          plainTextValue
-        )
-      }
-    })
-  }
+  const isLoading = () => Children.toArray(children).some(child => child && child.props.isLoading)
+  const isOpened = () => isNumber(selection.start) && (countSuggestions(currentSuggestions) !== 0 || isLoading())
 
-  clearSuggestions = () => {
-    // Invalidate previous queries. Async results for previous queries will be neglected.
-    this._queryId++
-    this.suggestions = {}
-    this.setState({
-      suggestions: {},
-      focusIndex: 0,
-    })
-  }
+  const uuidSuggestionsOverlay = useRef(Math.random().toString(16).substring(2)).current;
 
-  queryData = (
-    query,
-    childIndex,
-    querySequenceStart,
-    querySequenceEnd,
-    plainTextValue
-  ) => {
-    const { children, ignoreAccents } = this.props
-    const mentionChild = Children.toArray(children)[childIndex]
-    const provideData = getDataProvider(mentionChild.props.data, ignoreAccents)
-    const syncResult = provideData(
-      query,
-      this.updateSuggestions.bind(
-        null,
-        this._queryId,
-        childIndex,
-        query,
-        querySequenceStart,
-        querySequenceEnd,
-        plainTextValue
-      )
+  const getInputProps = () => {
+    const { readOnly, disabled } = props
+    const otherProps = omit(
+      props,
+      ['style', 'classNames', 'className'],
+      keys(MentionsInput.propTypes)
     )
-    if (syncResult instanceof Array) {
-      this.updateSuggestions(
-        this._queryId,
-        childIndex,
-        query,
-        querySequenceStart,
-        querySequenceEnd,
-        plainTextValue,
-        syncResult
-      )
-    }
-  }
 
-  updateSuggestions = (
-    queryId,
-    childIndex,
-    query,
-    querySequenceStart,
-    querySequenceEnd,
-    plainTextValue,
-    results
-  ) => {
-    // neglect async results from previous queries
-    if (queryId !== this._queryId) return
-
-    // save in property so that multiple sync state updates from different mentions sources
-    // won't overwrite each other
-    this.suggestions = {
-      ...this.suggestions,
-      [childIndex]: {
-        queryInfo: {
-          childIndex,
-          query,
-          querySequenceStart,
-          querySequenceEnd,
-          plainTextValue,
-        },
-        results,
+    return {
+      ...otherProps,
+      ...style('input'),
+      value: plainText,
+      onScroll: () => {
+        if(highlighterRef.current && inputRef.current) {
+            highlighterRef.current.scrollLeft = inputRef.current.scrollLeft;
+            highlighterRef.current.scrollTop = inputRef.current.scrollTop;
+            highlighterRef.current.height = inputRef.current.height;
+        }
       },
+      ...(!readOnly &&
+        !disabled && {
+          onChange: handleChange,
+          onSelect: handleSelect,
+          onKeyDown: handleKeyDown,
+          onBlur: handleBlur,
+          onCompositionStart: () => { isComposingRef.current = true },
+          onCompositionEnd: () => { isComposingRef.current = false },
+        }),
+      ...(isOpened() && {
+        role: 'combobox',
+        'aria-controls': uuidSuggestionsOverlay,
+        'aria-expanded': true,
+        'aria-autocomplete': 'list',
+        'aria-haspopup': 'listbox',
+        'aria-activedescendant': getSuggestionHtmlId(
+          uuidSuggestionsOverlay,
+          focusIndex
+        ),
+      }),
     }
-
-    const { focusIndex } = this.state
-    const suggestionsCount = countSuggestions(this.suggestions)
-    this.setState({
-      suggestions: this.suggestions,
-      focusIndex:
-        focusIndex >= suggestionsCount
-          ? Math.max(suggestionsCount - 1, 0)
-          : focusIndex,
-    })
   }
 
-  addMention = (
-    { id, display },
-    { childIndex, querySequenceStart, querySequenceEnd, plainTextValue }
-  ) => {
-    // Insert mention in the marked up value at the correct position
-    const value = this.props.value || ''
-    const config = readConfigFromChildren(this.props.children)
-    const mentionsChild = Children.toArray(this.props.children)[childIndex]
-    const {
-      markup,
-      displayTransform,
-      appendSpaceOnAdd,
-      onAdd,
-    } = mentionsChild.props
+  const renderControl = () => {
+    const inputProps = getInputProps()
+    return (
+      <div {...style('control')}>
+        <Highlighter
+          containerRef={highlighterRef}
+          style={style('highlighter')}
+          value={value}
+          singleLine={singleLine}
+          selectionStart={selection.start}
+          selectionEnd={selection.end}
+          onCaretPositionChange={setCaretPosition}
+        >
+          {children}
+        </Highlighter>
+        {CustomInput ? (
+          <CustomInput ref={setInputRef} {...inputProps} />
+        ) : singleLine ? (
+          <input type="text" ref={setInputRef} {...inputProps} />
+        ) : (
+          <textarea ref={setInputRef} {...inputProps} />
+        )}
+      </div>
+    )
+  }
 
-    const start = mapPlainTextIndex(value, config, querySequenceStart, 'START')
-    const end = start + querySequenceEnd - querySequenceStart
+  const renderSuggestionsOverlay = () => {
+    if (!isNumber(selection.start)) return null
 
-    let insert = makeMentionsMarkup(markup, id, display)
-
-    if (appendSpaceOnAdd) {
-      insert += ' '
-    }
-    const newValue = spliceString(value, start, end, insert)
-
-    // Refocus input and set caret position to end of mention
-    this.inputElement.focus()
-
-    let displayValue = displayTransform(id, display)
-    if (appendSpaceOnAdd) {
-      displayValue += ' '
-    }
-    const newCaretPosition = querySequenceStart + displayValue.length
-    this.setState({
-      selectionStart: newCaretPosition,
-      selectionEnd: newCaretPosition,
-      setSelectionAfterMentionChange: true,
-    })
-
-    // Propagate change
-    const eventMock = { target: { value: newValue } }
-    const mentions = getMentions(newValue, config)
-    const newPlainTextValue = spliceString(
-      plainTextValue,
-      querySequenceStart,
-      querySequenceEnd,
-      displayValue
+    const suggestionsNode = (
+      <SuggestionsOverlay
+        id={uuidSuggestionsOverlay}
+        style={props.style('suggestions')}
+        position={suggestionsPosition.position}
+        left={suggestionsPosition.left}
+        top={suggestionsPosition.top}
+        right={suggestionsPosition.right}
+        focusIndex={focusIndex}
+        scrollFocusedIntoView={scrollFocusedIntoView}
+        containerRef={suggestionsRef}
+        suggestions={currentSuggestions}
+        customSuggestionsContainer={customSuggestionsContainer}
+        onSelect={addMention}
+        onMouseDown={() => { suggestionsMouseDown.current = true }}
+        onMouseEnter={setFocusIndex}
+        isLoading={isLoading()}
+        isOpened={isOpened()}
+        ignoreAccents={ignoreAccents}
+        a11ySuggestionsListLabel={a11ySuggestionsListLabel}
+      >
+        {children}
+      </SuggestionsOverlay>
     )
 
-    this.executeOnChange(eventMock, newValue, newPlainTextValue, mentions)
-
-    if (onAdd) {
-      onAdd(id, display, start, end)
-    }
-
-    // Make sure the suggestions overlay is closed
-    this.clearSuggestions()
+    return suggestionsPortalHost
+      ? ReactDOM.createPortal(suggestionsNode, suggestionsPortalHost)
+      : suggestionsNode
   }
 
-  isLoading = () => {
-    let isLoading = false
-    React.Children.forEach(this.props.children, function(child) {
-      isLoading = isLoading || (child && child.props.isLoading)
-    })
-    return isLoading
-  }
-
-  isOpened = () =>
-    isNumber(this.state.selectionStart) &&
-    (countSuggestions(this.state.suggestions) !== 0 || this.isLoading())
-
-  _queryId = 0
-}
-
-/**
- * Returns the computed length property value for the provided element.
- * Note: According to spec and testing, can count on length values coming back in pixels. See https://developer.mozilla.org/en-US/docs/Web/CSS/used_value#Difference_from_computed_value
- */
-const getComputedStyleLengthProp = (forElement, propertyName) => {
-  const length = parseFloat(
-    window.getComputedStyle(forElement, null).getPropertyValue(propertyName)
+  return (
+    <div ref={containerRef} {...style}>
+      {renderControl()}
+      {renderSuggestionsOverlay()}
+    </div>
   )
-  return isFinite(length) ? length : 0
 }
 
 const isMobileSafari =
@@ -1092,7 +738,6 @@ const styled = defaultStyle(
   {
     position: 'relative',
     overflowY: 'visible',
-
     input: {
       display: 'block',
       width: '100%',
@@ -1106,21 +751,13 @@ const styled = defaultStyle(
       fontSize: 'inherit',
       letterSpacing: 'inherit',
     },
-
     '&multiLine': {
       input: {
         height: '100%',
         bottom: 0,
         overflow: 'hidden',
         resize: 'none',
-
-        // fix weird textarea padding in mobile Safari (see: http://stackoverflow.com/questions/6890149/remove-3-pixels-in-ios-webkit-textarea)
-        ...(isMobileSafari
-          ? {
-              marginTop: 1,
-              marginLeft: -3,
-            }
-          : null),
+        ...(isMobileSafari ? { marginTop: 1, marginLeft: -3 } : null),
       },
     },
   },
@@ -1129,5 +766,16 @@ const styled = defaultStyle(
     '&multiLine': !singleLine,
   })
 )
+
+// propTypes are not supported in React 19 for function components,
+// but we keep them here for documentation purposes.
+// Consider migrating to TypeScript for type safety.
+MentionsInput.propTypes = {
+  singleLine: (props, propName) =>
+    typeof props[propName] !== 'boolean'
+      ? new Error('singleLine must be a boolean')
+      : null,
+  // ... other prop types
+}
 
 export default styled(MentionsInput)
