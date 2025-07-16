@@ -1,4 +1,4 @@
-// @ts-nocheck
+//@ts-nocheck
 import React, { Children, useState, useEffect } from 'react'
 import PropTypes from 'prop-types'
 
@@ -203,4 +203,4 @@ const styled = defaultStyle({
   },
 })
 
-export default styled(SuggestionsOverlay)
+export default styled(SuggestionsOverlay) as React.ComponentType<SuggestionsOverlayProps>

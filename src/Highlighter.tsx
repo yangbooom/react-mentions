@@ -208,4 +208,4 @@ const styled = defaultStyle(
   })
 )
 
-export default styled(Highlighter)
+export default styled(Highlighter) as React.ComponentType<HighlighterProps>

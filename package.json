@@ -5,26 +5,13 @@
   "files": [
     "dist"
   ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "format": "prettier --write --no-semi --single-quote --trailing-comma es5 \"{src,src-ts,test,demo/src}/**/*.{js,ts,tsx}\"",
-    "lint": "eslint --max-warnings=0 --ext .js,.ts,.tsx src src-ts demo",
+    "format": "prettier --write --no-semi --single-quote --trailing-comma es5 \"{src,test,demo/src}/**/*.{js,ts,tsx}\"",
+    "lint": "eslint --max-warnings=0 --ext .js,.ts,.tsx src",
     "build": "tsc"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/signavio/react-mentions.git"
-  },
-  "keywords": [
-    "react",
-    "mentions",
-    "react-component"
-  ],
-  "browserslist": [
-    "chrome >= 50",
-    "firefox >= 52",
-    "safari >= 10",
-    "ie >= 11"
-  ],
   "dependencies": {
     "invariant": "^2.2.4",
     "prop-types": "^15.5.8",
